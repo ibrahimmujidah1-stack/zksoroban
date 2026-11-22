@@ -1,7 +1,6 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::testutils::storage::Instance as _;
 use soroban_sdk::testutils::storage::Temporary as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{vec, Address, Bytes, BytesN, Env, Event as _, IntoVal, String, Vec};
@@ -821,7 +820,7 @@ fn admin_can_update_limits() {
 
 #[test]
 fn get_config_returns_initialized_values() {
-    let (env, admin, client) = setup(7, 42);
+    let (_env, admin, client) = setup(7, 42);
 
     let config = client.get_config();
 
@@ -1914,4 +1913,67 @@ fn verify_proof_aborts_when_fee_transfer_fails() {
 
     call_valid(&env, &client, &caller);
 }
+
+#[test]
+fn verify_batch_charges_fee_per_proof_via_token_transfer() {
+    let (env, _admin, client) = setup(10, 100);
+    let token_id = env.register(MockToken, ());
+    let token_client = MockTokenClient::new(&env, &token_id);
+    let recipient = Address::generate(&env);
+    let caller = Address::generate(&env);
+
+    let fee_per_proof = 400_000i128;
+    client.set_verification_fee(&token_id, &fee_per_proof, &recipient);
+    token_client.set_balance(&caller, &2_000_000);
+
+    let batch = vec![&env, valid_batch_item(&env), valid_batch_item_1b(&env)];
+    let results = client.verify_batch(&caller, &batch);
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap());
+    assert!(results.get(1).unwrap());
+
+    let transfers = token_client.get_transfers();
+    assert_eq!(transfers.len(), 1);
+    let transfer = transfers.get(0).unwrap();
+    assert_eq!(transfer.from, caller);
+    assert_eq!(transfer.to, recipient);
+    assert_eq!(transfer.amount, fee_per_proof * 2);
+}
+
+#[test]
+fn verify_batch_empty_charges_no_fee() {
+    let (env, _admin, client) = setup(10, 100);
+    let token_id = env.register(MockToken, ());
+    let token_client = MockTokenClient::new(&env, &token_id);
+    let recipient = Address::generate(&env);
+    let caller = Address::generate(&env);
+
+    client.set_verification_fee(&token_id, &500_000, &recipient);
+    token_client.set_balance(&caller, &1_000_000);
+
+    let empty_batch = Vec::new(&env);
+    let results = client.verify_batch(&caller, &empty_batch);
+    assert_eq!(results.len(), 0);
+
+    let transfers = token_client.get_transfers();
+    assert_eq!(transfers.len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "insufficient balance")]
+fn verify_batch_aborts_when_fee_transfer_fails() {
+    let (env, _admin, client) = setup(10, 100);
+    let token_id = env.register(MockToken, ());
+    let token_client = MockTokenClient::new(&env, &token_id);
+    let recipient = Address::generate(&env);
+    let caller = Address::generate(&env);
+
+    let fee_per_proof = 500_000i128;
+    client.set_verification_fee(&token_id, &fee_per_proof, &recipient);
+    token_client.set_balance(&caller, &600_000);
+
+    let batch = vec![&env, valid_batch_item(&env), valid_batch_item_1b(&env)];
+    client.verify_batch(&caller, &batch);
+}
+
 

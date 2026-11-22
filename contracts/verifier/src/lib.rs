@@ -494,6 +494,22 @@ impl VerifierContract {
         }
         caller.require_auth();
 
+        if let Some(fee) = env
+            .storage()
+            .instance()
+            .get::<_, VerificationFee>(&DataKey::VerificationFee)
+        {
+            if fee.amount > 0 && !proofs.is_empty() {
+                let count = proofs.len() as i128;
+                let total_fee = fee
+                    .amount
+                    .checked_mul(count)
+                    .unwrap_or(fee.amount);
+                let token_client = soroban_sdk::token::Client::new(&env, &fee.token);
+                token_client.transfer(&caller, &fee.recipient, &total_fee);
+            }
+        }
+
         let mut results = Vec::new(&env);
         for item in proofs.iter() {
             let success = match verify_one(&env, &caller, &item) {

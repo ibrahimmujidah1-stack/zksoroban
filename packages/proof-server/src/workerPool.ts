@@ -21,39 +21,53 @@ export class WorkerPool {
   private taskQueue: PendingTask[] = [];
   private taskMap = new Map<string, PendingTask>();
   private closed = false;
+  private readonly workerScript: string;
 
   constructor(
     public readonly poolSize: number = Math.max(2, os.cpus()?.length || 2),
     workerScriptPath?: string
   ) {
-    const script =
+    this.workerScript =
       workerScriptPath || path.resolve(__dirname, "worker.js");
 
     for (let i = 0; i < this.poolSize; i++) {
-      const worker = new Worker(script);
-
-      const workerState: WorkerState = {
-        worker,
-        busy: false
-      };
-
-      worker.on("message", (msg: ProofJobResult) => {
-        this.onWorkerMessage(workerState, msg);
-      });
-
-      worker.on("error", (err) => {
-        this.onWorkerError(workerState, err);
-      });
-
-      worker.on("exit", (code) => {
-        if (!this.closed && code !== 0) {
-          // Restart worker if it crashed unexpectedly
-          this.restartWorker(workerState, script, execArgv);
-        }
-      });
-
-      this.workers.push(workerState);
+      this.workers.push(this.createWorkerState(this.workerScript));
     }
+  }
+
+  private createWorkerState(script: string): WorkerState {
+    const worker = new Worker(script);
+    const workerState: WorkerState = {
+      worker,
+      busy: false,
+    };
+
+    worker.on("message", (msg: ProofJobResult) => {
+      this.onWorkerMessage(workerState, msg);
+    });
+
+    worker.on("error", (err: unknown) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.onWorkerError(workerState, error);
+    });
+
+    worker.on("exit", (code: number) => {
+      if (workerState.currentTaskId) {
+        const task = this.taskMap.get(workerState.currentTaskId);
+        if (task) {
+          this.taskMap.delete(workerState.currentTaskId);
+          task.reject(new Error(`Worker exited unexpectedly with code ${code}`));
+        }
+        workerState.busy = false;
+        workerState.currentTaskId = undefined;
+      }
+      if (!this.closed) {
+        // Restart worker if it crashed or exited unexpectedly
+        this.restartWorker(workerState, script);
+      }
+    });
+
+    return workerState;
   }
 
   public get size(): number {
@@ -66,6 +80,13 @@ export class WorkerPool {
 
   public get busyWorkers(): number {
     return this.workers.filter((w) => w.busy).length;
+  }
+
+  /**
+   * Returns a copy of active worker threads for diagnostics and test verification.
+   */
+  public getWorkers(): readonly Worker[] {
+    return this.workers.map((w) => w.worker);
   }
 
   public execute(
@@ -102,7 +123,7 @@ export class WorkerPool {
       const pendingTask: PendingTask = {
         job,
         resolve: wrappedResolve,
-        reject: wrappedReject
+        reject: wrappedReject,
       };
 
       this.taskMap.set(id, pendingTask);
@@ -162,24 +183,7 @@ export class WorkerPool {
   ): void {
     const idx = this.workers.indexOf(oldState);
     if (idx !== -1) {
-      const newWorker = new Worker(script);
-      const newState: WorkerState = {
-        worker: newWorker,
-        busy: false
-      };
-
-      newWorker.on("message", (msg: ProofJobResult) => {
-        this.onWorkerMessage(newState, msg);
-      });
-      newWorker.on("error", (err) => {
-        this.onWorkerError(newState, err);
-      });
-      newWorker.on("exit", (code) => {
-        if (!this.closed && code !== 0) {
-          this.restartWorker(newState, script);
-        }
-      });
-
+      const newState = this.createWorkerState(script);
       this.workers[idx] = newState;
 
       const nextTask = this.taskQueue.shift();
